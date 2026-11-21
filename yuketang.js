@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.2.0
+// @version      3.2.1
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.2.0',     // 版本号
+    version: '3.2.1',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -1302,22 +1302,24 @@
       return out;
     },
 
-    // 汇集上报标识符：页面自身上报载荷优先，页面状态兜底
+    // 汇集上报标识符：当前页面/任务的 id 优先，抓包值仅在与当前视频一致时采用（防 SPA 切换后的残留）
     gatherIds({ media, hintVideoId } = {}) {
       const heart = this.captured.heart || {};
       const query = this.captured.query || {};
       const page = this.pageIds({ media, hintVideoId });
-      const duration = this.mediaDuration(media) || Number(heart.d) || 0;
+      const v = page.v || query.video_id || heart.v || '';
+      const sameVideo = !heart.v || String(heart.v) === String(v);
+      const duration = this.mediaDuration(media) || (sameVideo ? Number(heart.d) : 0) || 0;
       return {
-        v: heart.v || query.video_id || page.v || '',
+        v,
         u: heart.u || query.user_id || page.u || 0,
         c: heart.c || query.cid || 0,
-        skuid: heart.skuid || '',
-        classroomid: heart.classroomid || query.classroom_id || page.classroomid || 0,
-        cc: heart.cc || '',
-        n: heart.n || page.n || 'other',
+        skuid: (sameVideo ? heart.skuid : '') || '',
+        classroomid: page.classroomid || query.classroom_id || heart.classroomid || 0,
+        cc: (sameVideo ? heart.cc : '') || '',
+        n: (sameVideo ? heart.n : '') || page.n || 'other',
         lob: heart.lob || 'ykt',
-        t: heart.t || page.t || 'video',
+        t: (sameVideo ? heart.t : '') || page.t || 'video',
         d: duration ? Math.round(10 * duration) / 10 : 0
       };
     },
@@ -1348,9 +1350,10 @@
           const detail = await this.fetchDetail(ids);
           const data = detail && detail.data;
           if (data && Number(data.video_id) === Number(ids.v) && String(data.classroom_id) === String(ids.classroomid)) {
-            ids.cc = ids.cc || data.ccid || '';
-            ids.skuid = ids.skuid || data.sku_id || '';
-            ids.c = ids.c || data.course_id || 0;
+            // detail 按 v 查询，是该视频的权威数据，优先于抓包值
+            ids.cc = data.ccid || ids.cc || '';
+            ids.skuid = data.sku_id || ids.skuid || '';
+            ids.c = data.course_id || ids.c || 0;
             ids.d = ids.d || Number(data.heartbeat && data.heartbeat.video_length) || 0;
             return ids;
           }
@@ -1373,7 +1376,29 @@
 
     isHeartDone(heartbeat) {
       if (!heartbeat) return false;
-      return heartbeat.completed === 1 || Number(heartbeat.rate) >= 0.95;
+      // 只有真正刷满才算完成；前端进度条没满（含上次刷到一半的残留进度）都要从未看区间续报
+      return heartbeat.completed === 1 || Number(heartbeat.rate) >= 0.99;
+    },
+
+    // 按服务端已看区间（heartbeat.result）计算未看缺口，返回 [[起, 止], ...]；无记录即整段未看
+    buildGaps(heartbeat, duration) {
+      const segs = [];
+      for (const item of (heartbeat && heartbeat.result) || []) {
+        const s = Number(item && item.s);
+        const e = Number(item && item.e);
+        if (Number.isFinite(s) && Number.isFinite(e) && e > s) {
+          segs.push([Math.max(0, s), Math.min(e, duration)]);
+        }
+      }
+      segs.sort((a, b) => a[0] - b[0]);
+      const gaps = [];
+      let cursor = 0;
+      for (const [s, e] of segs) {
+        if (s > cursor + 1) gaps.push([cursor, s]);
+        if (e > cursor) cursor = e;
+      }
+      if (cursor < duration - 1) gaps.push([cursor, duration]);
+      return gaps;
     },
 
     // 上报请求头：复刻页面客户端的鉴权与端标识
@@ -1396,8 +1421,8 @@
       return headers;
     },
 
-    // 按页面自然上报的事件格式补发 0→时长 的观看流，分批上报（每批含 heartbeat 事件）
-    async sendWatchStream(ids, duration) {
+    // 按页面自然上报的事件格式补发未看区间的观看流，分批上报（每批须含 heartbeat/videoend 事件才会被服务端处理）
+    async sendWatchStream(ids, gaps, duration) {
       const pg = `${ids.v}_${Math.random().toString(36).slice(2, 7)}`;
       const base = {
         i: 5, p: 'web', n: ids.n, lob: ids.lob,
@@ -1410,24 +1435,38 @@
       const t0 = Date.now();
       const events = [];
       let sq = 0;
+      let seq = 0;
       const push = (et, cp, tsOff) => events.push(Object.assign({}, base, {
         et, cp: Math.round(10 * cp) / 10, ts: String(t0 + tsOff), sq: ++sq
       }));
-      push('loadstart', 0, 0);
-      push('loadeddata', 0, 300);
-      push('play', 0, 600);
-      push('playing', 0, 900);
-      let off = 900;
-      for (let cp = 5; cp < duration; cp += 5) {
+      let off = 0;
+      for (const [from, to] of gaps) {
+        const start = Math.max(0, from);
+        if (start < 1) {
+          // 从头看起时建立会话事件（让服务端从 0 开始记区间）
+          off += 300; push('loadstart', 0, off);
+          off += 300; push('loadeddata', 0, off);
+          off += 300; push('play', 0, off);
+        }
+        off += 300;
+        push('playing', start, off);
+        for (let cp = start + 5; cp < to; cp += 5) {
+          off += 250;
+          push(++seq % 5 === 0 ? 'heartbeat' : 'playing', cp, off);
+        }
+        // 区间收尾补 heartbeat，保证每个缺口的批次都能被处理
         off += 250;
-        push(cp % 25 === 0 ? 'heartbeat' : 'playing', cp, off);
+        push('heartbeat', to, off);
       }
-      off += 250;
-      push('playing', duration, off);
+      // 无论缺口在哪，最后补 videoend 触发服务端的完成判定
       off += 250;
       push('videoend', duration, off);
       for (let i = 0; i < events.length; i += 40) {
         const batch = events.slice(i, i + 40);
+        // 兜底：批次内没有 heartbeat/videoend 时服务端会忽略整批，把末条改为 heartbeat
+        if (!batch.some(e => e.et === 'heartbeat' || e.et === 'videoend') && batch.length) {
+          batch[batch.length - 1] = Object.assign({}, batch[batch.length - 1], { et: 'heartbeat' });
+        }
         let sent = false;
         for (let retry = 0; retry < 3 && !sent; retry++) {
           try {
@@ -1450,7 +1489,7 @@
       return true;
     },
 
-    // 直报主流程：查现状 → 补发完整观看流 → 轮询服务端完成状态（最多两轮）
+    // 直报主流程：查现状 → 只补发未看区间的观看流 → 轮询服务端完成状态（最多两轮）
     async completeLeaf({ media, hintVideoId, title = '', timeout = 15000 } = {}) {
       const conf = Store.getReportConf();
       if (!conf.directReport) return false;
@@ -1463,7 +1502,8 @@
         return false;
       }
       let detail = await this.fetchDetail(ids);
-      if (this.isHeartDone(detail && detail.data && detail.data.heartbeat)) {
+      let heartbeat = detail && detail.data && detail.data.heartbeat;
+      if (this.isHeartDone(heartbeat)) {
         log(`进度直报：《${title}》服务端已有完成记录，无需上报`);
         return true;
       }
@@ -1477,8 +1517,13 @@
       }
       for (let pass = 1; pass <= 2; pass++) {
         if (Session.isStopped()) return false;
-        log(`进度直报：上报《${title}》观看记录（0 → ${Math.round(ids.d)} 秒）第 ${pass} 轮`);
-        if (!await this.sendWatchStream(ids, ids.d)) {
+        // 每轮基于最新已看区间只补未看部分（残留进度可能是上次刷到一半留下的）
+        const gaps = this.buildGaps(heartbeat, ids.d);
+        const gapText = gaps.length
+          ? gaps.map(([from, to]) => `${Math.round(from)}→${Math.round(to)}秒`).join('、')
+          : '无缺口（仅补 videoend 触发完成判定）';
+        log(`进度直报：《${title}》第 ${pass} 轮补报未看区间：${gapText}`);
+        if (!await this.sendWatchStream(ids, gaps, ids.d)) {
           warn('进度直报：上报请求失败');
           return false;
         }
@@ -1486,7 +1531,7 @@
           await Utils.sleep(2000);
           if (Session.isStopped()) return false;
           detail = await this.fetchDetail(ids);
-          const heartbeat = detail && detail.data && detail.data.heartbeat;
+          heartbeat = detail && detail.data && detail.data.heartbeat;
           if (this.isHeartDone(heartbeat)) {
             log(`进度直报：《${title}》已完成（rate=${heartbeat.rate ?? heartbeat.completed}）`);
             return true;

@@ -45,7 +45,8 @@ UI 面板实例 `panel` 为全局单例，各模块直接引用，不逐层传�
 - 服务端以 `POST /video-log/heartbeat/` 的 `heart_data` 事件流为准：事件带 `cp`（播放位置）/`et`（loadstart/loadeddata/play/playing/heartbeat/videoend）/`sq`/`ts`/`pg` 等字段，服务端按 `cp` 合并已看区间（每事件覆盖约 `[cp-4, cp+1]`），区间覆盖全片（rate≥95% 且收到 videoend）即判定看完；只处理含 heartbeat/videoend 事件的批次。
 - `installHooks`：包装页面的 `XMLHttpRequest.send` 与 `fetch`——抓取上报载荷里的标识符（v/u/c/skuid/classroomid/cc/d，或 `get_video_watch_progress`/`detail` 的 query），并在"直报+屏蔽原生上报"开启且刷课进行中时拦截 `/video-log/heartbeat/` 与 `/video-log/log/track/`，伪造成功响应让页面清空重试队列；直报自身的发送走 `_origFetch` 绕过拦截。
 - `collectIds`：合并钩子抓取值与页面兜底（ai-workspace 路由、query、vuex 用户信息、cookie 课堂 id），经 `GET /video-log/detail/` 校验并补全 `ccid`/`sku_id`/`course_id`/`video_length`（该接口同时返回服务端已看区间与 `completed`/`rate`）。
-- `completeLeaf`：查 detail 短路已完成 → 取时长（媒体元数据/detail）→ `sendWatchStream` 按自然格式补发 0→时长 观看流（loadstart/loadeddata/play 开场、每 5 秒 playing/heartbeat 推进、videoend 收尾，分批 40 条）→ 轮询 detail 至 `completed=1` 或 `rate≥0.95`（最多两轮）；失败返回 false 由 Runner 回退倍速播放。
+- `buildGaps`：按 detail 的已看区间（`heartbeat.result`）计算 `[0, 时长]` 的未看缺口；`isHeartDone` 仅认 `completed=1` 或 `rate≥0.99`（没满就继续补报，兼容上次刷到一半的残留进度）。
+- `completeLeaf`：查 detail 短路已完成 → 取时长（媒体元数据/detail）→ `sendWatchStream` 按自然格式**只补发未看缺口**的观看流（从头看起时 loadstart/loadeddata/play 开场、每 5 秒 playing/heartbeat 推进、区间收尾 heartbeat、全程末尾 videoend，分批 40 条且每批保证含 heartbeat/videoend）→ 轮询 detail 至完成（最多两轮，每轮按最新已看区间重算缺口）；失败返回 false 由 Runner 回退倍速播放。
 
 ### AI 答题（Solver）
 
