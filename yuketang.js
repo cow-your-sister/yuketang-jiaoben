@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.1.2
+// @version      3.2.0
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.1.2',     // 版本号
+    version: '3.2.0',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -39,6 +39,7 @@
       proClassCount: 'pro_lms_classCount',
       feature: 'ykt_feature_conf', // 是否开启AI作答/自动评论
       rate: 'ykt_rate_conf', // 视频倍速配置：目标倍速与各解锁限制修改点开关
+      report: 'ykt_report_conf', // 进度直报配置：免播放直报观看记录/屏蔽客户端自带上报
       flow: 'ykt_flow_conf', // 刷课流程配置：自动切换任务点/界面、停止后还原修改
       pendingAutoStart: 'ykt_pending_auto_start',
       userStopped: 'ykt_user_stopped' // 用户已点击停止刷课（持久化，防止重新加载后自动恢复）
@@ -244,6 +245,18 @@
     },
     setRateConf(conf) {
       localStorage.setItem(Config.storageKeys.rate, JSON.stringify(conf));
+    },
+    getReportConf() {
+      const saved = Utils.safeJSONParse(localStorage.getItem(Config.storageKeys.report), {}) || {};
+      const conf = {
+        directReport: saved.directReport ?? true, // 进度直报：免播放直接上报观看记录
+        blockNative: saved.blockNative ?? true, // 屏蔽客户端自带的进度/埋点上报（直报开启时生效）
+      };
+      localStorage.setItem(Config.storageKeys.report, JSON.stringify(conf));
+      return conf;
+    },
+    setReportConf(conf) {
+      localStorage.setItem(Config.storageKeys.report, JSON.stringify(conf));
     },
     getFlowConf() {
       const saved = Utils.safeJSONParse(localStorage.getItem(Config.storageKeys.flow), {}) || {};
@@ -554,6 +567,7 @@
               <div class="body">
                 <ul class="info" id="info">
                   <li>⭐ 脚本支持：雨课堂所有版本</li>
+                  <li>🎬 视频默认走<strong>进度直报</strong>：免播放直接完成，可在[脚本设置]中调整</li>
                   <li>🤖 <strong>支持模型：</strong>DeepSeek、Kimi(Moonshot)、通义千问、OpenAI、Claude(Anthropic)</li>
                   <li>📢 <strong>使用必读：</strong>自动答题需先点击<span style="color:green">[脚本设置]</span>开启并填入API Key</li>
                   <li>🚀 配置完成后，点击<span style="color:blue">[开始刷课]</span>即可启动视频与作业挂机</li>
@@ -642,6 +656,23 @@
                   <div class="hint">包装媒体元素的 playbackRate，拦截雨课堂播放器把倍速回写为低值（含限速定时器的异步回写）；用户手动调速不受影响</div>
                 </div>
                 <div class="form-item">
+                  <label style="font-weight:bold;font-size:13px;">进度直报</label>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="report_direct">
+                    启用进度直报：免播放直接完成视频
+                  </label>
+                  <div class="hint">向 /video-log/heartbeat/ 直接补发完整观看记录，无需真实播放即可判定看完；失败时自动回退为倍速播放</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="report_block_native">
+                    屏蔽客户端自带的进度/埋点上报
+                  </label>
+                  <div class="hint">直报开启且刷课进行中时生效：拦截页面自身的 video-log 心跳与 track 埋点上报并模拟成功，避免与直报数据互相干扰；停止刷课后恢复页面原生上报</div>
+                </div>
+                <div class="form-item">
                   <label style="font-weight:bold;font-size:13px;">刷课流程</label>
                 </div>
                 <div class="form-item">
@@ -701,6 +732,8 @@
       rateDirectSet: doc.getElementById('rate_direct_set'),
       rateKeepAlive: doc.getElementById('rate_keep_alive'),
       rateUnlock: doc.getElementById('rate_unlock'),
+      reportDirect: doc.getElementById('report_direct'),
+      reportBlockNative: doc.getElementById('report_block_native'),
       flowAutoSwitch: doc.getElementById('flow_auto_switch'),
       flowRestoreOnStop: doc.getElementById('flow_restore_on_stop'),
       minimality: doc.getElementById('minimality'),
@@ -812,6 +845,11 @@
       ui.rateKeepAlive.checked = saved.keepAliveEnabled;
       ui.rateUnlock.checked = saved.ratechangeBlockEnabled;
     };
+    const loadReportConf = () => {
+      const saved = Store.getReportConf();
+      ui.reportDirect.checked = saved.directReport;
+      ui.reportBlockNative.checked = saved.blockNative;
+    };
     const loadFlowConf = () => {
       const saved = Store.getFlowConf();
       ui.flowAutoSwitch.checked = saved.autoSwitch;
@@ -820,11 +858,13 @@
     loadAIConf();
     loadFeatureConf();
     loadRateConf();
+    loadReportConf();
     loadFlowConf();
     ui.btnSetting.onclick = () => {
       loadAIConf();
       loadFeatureConf();
       loadRateConf();
+      loadReportConf();
       loadFlowConf();
       ui.settings.style.display = 'block';
     };
@@ -854,6 +894,11 @@
         ratechangeBlockEnabled: ui.rateUnlock.checked
       };
       Store.setRateConf(rateConf);
+      const reportConf = {
+        directReport: ui.reportDirect.checked,
+        blockNative: ui.reportBlockNative.checked
+      };
+      Store.setReportConf(reportConf);
       const flowConf = {
         autoSwitch: ui.flowAutoSwitch.checked,
         restoreOnStop: ui.flowRestoreOnStop.checked
@@ -1112,6 +1157,348 @@
       }
     }
   };
+
+  // ---- 进度直报：免播放直接向服务端补发完整观看记录 ----
+  // 雨课堂把观看进度记在 POST /video-log/heartbeat/ 的 heart_data 事件流里：
+  // 每条事件带 cp（播放位置）与 et（事件类型），服务端按 cp 合并出已看区间，
+  // 区间覆盖全片（rate>=95% 且收到 videoend）即判定视频看完。
+  // 这里拦截页面自身的上报请求抓取标识符（v/u/c/skuid/classroomid/cc/d），
+  // 再按同样事件格式补发 0→时长 的完整观看流，让服务端认为已看完，无需真实播放。
+  // 实测服务端只处理含 heartbeat/videoend 事件的批次，故事件流里周期性穿插 heartbeat。
+  const VideoReporter = {
+    hooked: false,
+    brushingActive: false, // 刷课会话进行中才屏蔽客户端自带上报，避免影响停止后的手动观看
+    captured: { heart: null, query: null },
+    _origFetch: null, // 页面原始 fetch，直报发送绕过网络钩子
+
+    // 页面网络钩子：抓取上报载荷里的标识符；按开关屏蔽客户端自带的心跳/埋点上报
+    installHooks() {
+      if (this.hooked) return;
+      this.hooked = true;
+      const win = unsafeWindow;
+      const self = this;
+      const classify = url => {
+        const u = String(url || '');
+        if (u.includes('/video-log/heartbeat')) return 'heartbeat';
+        if (u.includes('/video-log/log/track')) return 'track';
+        if (u.includes('get_video_watch_progress') || u.includes('get_video_watched_record') || u.includes('/video-log/detail/')) return 'progress';
+        return '';
+      };
+      const shouldBlock = kind => {
+        if (kind !== 'heartbeat' && kind !== 'track') return false;
+        const conf = Store.getReportConf();
+        return conf.directReport && conf.blockNative && self.brushingActive;
+      };
+      const capture = (kind, url, body) => {
+        try {
+          if (kind === 'heartbeat') {
+            const data = Utils.safeJSONParse(body, null);
+            const list = data && data.heart_data;
+            if (Array.isArray(list) && list.length) {
+              self.captured.heart = Object.assign({}, self.captured.heart || {}, list[list.length - 1]);
+            }
+          } else if (kind === 'progress') {
+            const params = new URLSearchParams(String(url).split('?')[1] || '');
+            const q = {};
+            for (const [key, value] of params) q[key] = value;
+            if (Object.keys(q).length) self.captured.query = Object.assign({}, self.captured.query || {}, q);
+          }
+        } catch (_) { /* 抓取失败不影响页面请求 */ }
+      };
+      // 伪造上报成功的响应体：同时满足 jQuery 与 axios 各自的成功判定，让页面清空重试队列
+      const FAKE_BODY = '{"success":true,"code":0,"status":0}';
+      const fakeXhrSuccess = (xhr, url) => {
+        try {
+          Object.defineProperty(xhr, 'readyState', { value: 4, configurable: true });
+          Object.defineProperty(xhr, 'status', { value: 200, configurable: true });
+          Object.defineProperty(xhr, 'statusText', { value: 'OK', configurable: true });
+          Object.defineProperty(xhr, 'responseText', { value: FAKE_BODY, configurable: true });
+          Object.defineProperty(xhr, 'response', { value: FAKE_BODY, configurable: true });
+          Object.defineProperty(xhr, 'responseURL', { value: url, configurable: true });
+          xhr.getAllResponseHeaders = () => 'content-type: application/json\r\n';
+          xhr.getResponseHeader = name => (/content-type/i.test(name) ? 'application/json' : null);
+          xhr.dispatchEvent(new Event('readystatechange'));
+          xhr.dispatchEvent(new Event('load'));
+          xhr.dispatchEvent(new Event('loadend'));
+        } catch (_) { /* 尽力模拟成功 */ }
+      };
+      // 包装 XMLHttpRequest（页面的心跳/埋点上报都走它，含 jQuery 与 axios）
+      const origOpen = win.XMLHttpRequest.prototype.open;
+      const origSend = win.XMLHttpRequest.prototype.send;
+      win.XMLHttpRequest.prototype.open = function (method, url) {
+        this.__yktLogUrl = url;
+        return origOpen.apply(this, arguments);
+      };
+      win.XMLHttpRequest.prototype.send = function (body) {
+        const url = this.__yktLogUrl || '';
+        const kind = classify(url);
+        if (kind) {
+          capture(kind, url, body);
+          if (shouldBlock(kind)) {
+            fakeXhrSuccess(this, url);
+            return;
+          }
+        }
+        return origSend.apply(this, arguments);
+      };
+      // 包装 fetch
+      const origFetch = win.fetch;
+      this._origFetch = origFetch; // 直报发送走原始 fetch，避免被自己安装的拦截器屏蔽
+      if (typeof origFetch === 'function') {
+        win.fetch = function (input, init) {
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          const kind = classify(url);
+          if (kind) {
+            capture(kind, url, init && init.body);
+            if (shouldBlock(kind)) {
+              return Promise.resolve(new win.Response(FAKE_BODY, { status: 200, headers: { 'content-type': 'application/json' } }));
+            }
+          }
+          return origFetch.apply(this, arguments);
+        };
+      }
+    },
+
+    // 刷课会话开关联动屏蔽开关（开始/停止刷课与课程刷完时调用）
+    setBrushing(active) {
+      this.brushingActive = !!active;
+    },
+
+    mediaDuration(media) {
+      if (!media) return 0;
+      const d = Number(media.duration);
+      return Number.isFinite(d) && d > 0 ? d : 0;
+    },
+
+    // 页面状态兜底解析标识符：ai-workspace 路由、query 参数、vuex 用户信息、cookie 课堂 id
+    pageIds({ media, hintVideoId } = {}) {
+      const out = {};
+      const query = new URLSearchParams(location.search);
+      const pathMatch = location.pathname.match(/\/ai-workspace\/lms-graph\/(\d+)\/(video|audio)\/(\d+)/);
+      if (pathMatch) {
+        out.classroomid = pathMatch[1];
+        out.v = pathMatch[3];
+        out.t = pathMatch[2] === 'audio' ? 'video_audio' : (query.get('isv3') ? 'ai_video' : 'video');
+      }
+      out.v = out.v || query.get('leaf_id') || query.get('leafId') || query.get('video_id') || hintVideoId || '';
+      for (const key of ['vuex', 'provuex']) {
+        const saved = Utils.safeJSONParse(localStorage.getItem(key), null);
+        const uid = saved && saved.userInfo && saved.userInfo.user_id;
+        if (uid) {
+          out.u = uid;
+          break;
+        }
+      }
+      out.classroomid = out.classroomid || query.get('classroom_id') || Utils.getCurrentClassroomId()
+        || (document.cookie.match(/(?:^|;\s*)classroom_id=(\d+)/) || [])[1] || 0;
+      if (media) {
+        try {
+          out.n = new URL(media.currentSrc || media.src || '', location.href).host || 'other';
+        } catch (_) {
+          out.n = 'other';
+        }
+        out.t = out.t || (media.tagName && media.tagName.toLowerCase() === 'audio' ? 'video_audio' : 'video');
+      }
+      return out;
+    },
+
+    // 汇集上报标识符：页面自身上报载荷优先，页面状态兜底
+    gatherIds({ media, hintVideoId } = {}) {
+      const heart = this.captured.heart || {};
+      const query = this.captured.query || {};
+      const page = this.pageIds({ media, hintVideoId });
+      const duration = this.mediaDuration(media) || Number(heart.d) || 0;
+      return {
+        v: heart.v || query.video_id || page.v || '',
+        u: heart.u || query.user_id || page.u || 0,
+        c: heart.c || query.cid || 0,
+        skuid: heart.skuid || '',
+        classroomid: heart.classroomid || query.classroom_id || page.classroomid || 0,
+        cc: heart.cc || '',
+        n: heart.n || page.n || 'other',
+        lob: heart.lob || 'ykt',
+        t: heart.t || page.t || 'video',
+        d: duration ? Math.round(10 * duration) / 10 : 0
+      };
+    },
+
+    // 查询服务端观看记录：返回 data（含 ccid/sku_id/course_id/video_length 与 heartbeat 进度）
+    async fetchDetail(ids) {
+      const params = new URLSearchParams({
+        video_id: ids.v,
+        user_id: ids.u,
+        classroom_id: ids.classroomid
+      });
+      if (ids.c) params.set('cid', ids.c);
+      try {
+        const doFetch = this._origFetch || unsafeWindow.fetch;
+        const res = await doFetch(`/video-log/detail/?${params}`, { credentials: 'include' });
+        return await res.json();
+      } catch (_) {
+        return null;
+      }
+    },
+
+    // 持续尝试拿到完整标识符，并经 detail 接口校验补全 cc/skuid/c
+    async collectIds({ media, hintVideoId, timeout = 15000 } = {}) {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        const ids = this.gatherIds({ media, hintVideoId });
+        if (ids.v && ids.u && ids.classroomid) {
+          const detail = await this.fetchDetail(ids);
+          const data = detail && detail.data;
+          if (data && Number(data.video_id) === Number(ids.v) && String(data.classroom_id) === String(ids.classroomid)) {
+            ids.cc = ids.cc || data.ccid || '';
+            ids.skuid = ids.skuid || data.sku_id || '';
+            ids.c = ids.c || data.course_id || 0;
+            ids.d = ids.d || Number(data.heartbeat && data.heartbeat.video_length) || 0;
+            return ids;
+          }
+        }
+        await Utils.sleep(500);
+      }
+      return null;
+    },
+
+    async waitForDuration(media, timeout = 10000) {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        const el = (media && this.mediaDuration(media)) ? media : (document.querySelector('video') || document.querySelector('audio'));
+        const d = this.mediaDuration(el);
+        if (d > 0) return d;
+        await Utils.sleep(500);
+      }
+      return 0;
+    },
+
+    isHeartDone(heartbeat) {
+      if (!heartbeat) return false;
+      return heartbeat.completed === 1 || Number(heartbeat.rate) >= 0.95;
+    },
+
+    // 上报请求头：复刻页面客户端的鉴权与端标识
+    buildHeaders(ids) {
+      const headers = { 'content-type': 'application/json' };
+      const cookie = document.cookie;
+      const csrf = (cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1];
+      if (csrf) headers['x-csrftoken'] = csrf;
+      const lob = String(ids.lob || 'ykt');
+      headers['xtbz'] = (lob === 'plat' || lob === 'plat2' || lob === 'xt') ? 'xt'
+        : lob === 'ykt' ? 'ykt'
+          : lob.includes('cloud') ? 'cloud'
+            : lob.includes('zyk_web') ? 'zyk'
+              : lob.includes('mtc') ? 'mtc' : lob;
+      const uv = (cookie.match(/(?:^|;\s*)uv_id=([^;]+)/) || [])[1];
+      const university = (cookie.match(/(?:^|;\s*)university_id=([^;]+)/) || [])[1];
+      if (uv) headers['uv-id'] = uv;
+      if (university) headers['university-id'] = university;
+      if (ids.classroomid) headers['classroom-id'] = String(ids.classroomid);
+      return headers;
+    },
+
+    // 按页面自然上报的事件格式补发 0→时长 的观看流，分批上报（每批含 heartbeat 事件）
+    async sendWatchStream(ids, duration) {
+      const pg = `${ids.v}_${Math.random().toString(36).slice(2, 7)}`;
+      const base = {
+        i: 5, p: 'web', n: ids.n, lob: ids.lob,
+        fp: 0, tp: 0, sp: 1,
+        u: ids.u, uip: '', c: ids.c, v: ids.v,
+        skuid: ids.skuid, classroomid: ids.classroomid,
+        cc: ids.cc, d: Math.round(10 * duration) / 10,
+        pg, t: ids.t, cards_id: 0, slide: 0, v_url: ''
+      };
+      const t0 = Date.now();
+      const events = [];
+      let sq = 0;
+      const push = (et, cp, tsOff) => events.push(Object.assign({}, base, {
+        et, cp: Math.round(10 * cp) / 10, ts: String(t0 + tsOff), sq: ++sq
+      }));
+      push('loadstart', 0, 0);
+      push('loadeddata', 0, 300);
+      push('play', 0, 600);
+      push('playing', 0, 900);
+      let off = 900;
+      for (let cp = 5; cp < duration; cp += 5) {
+        off += 250;
+        push(cp % 25 === 0 ? 'heartbeat' : 'playing', cp, off);
+      }
+      off += 250;
+      push('playing', duration, off);
+      off += 250;
+      push('videoend', duration, off);
+      for (let i = 0; i < events.length; i += 40) {
+        const batch = events.slice(i, i + 40);
+        let sent = false;
+        for (let retry = 0; retry < 3 && !sent; retry++) {
+          try {
+            const doFetch = this._origFetch || unsafeWindow.fetch;
+            const res = await doFetch('/video-log/heartbeat/', {
+              method: 'POST',
+              credentials: 'include',
+              headers: this.buildHeaders(ids),
+              body: JSON.stringify({ heart_data: batch })
+            });
+            sent = res.ok;
+          } catch (_) {
+            sent = false;
+          }
+          if (!sent) await Utils.sleep(1000);
+        }
+        if (!sent) return false;
+        await Utils.sleep(150);
+      }
+      return true;
+    },
+
+    // 直报主流程：查现状 → 补发完整观看流 → 轮询服务端完成状态（最多两轮）
+    async completeLeaf({ media, hintVideoId, title = '', timeout = 15000 } = {}) {
+      const conf = Store.getReportConf();
+      if (!conf.directReport) return false;
+      const log = msg => panel && panel.log(msg);
+      const warn = msg => panel && panel.warn(msg);
+      log(`进度直报：正在获取《${title}》的上报标识`);
+      const ids = await this.collectIds({ media, hintVideoId, timeout });
+      if (!ids) {
+        warn('进度直报：未能获取视频标识（v/user_id/classroom_id），放弃直报');
+        return false;
+      }
+      let detail = await this.fetchDetail(ids);
+      if (this.isHeartDone(detail && detail.data && detail.data.heartbeat)) {
+        log(`进度直报：《${title}》服务端已有完成记录，无需上报`);
+        return true;
+      }
+      if (!(ids.d > 0)) {
+        const duration = await this.waitForDuration(media, 10000);
+        if (duration > 0) ids.d = Math.round(10 * duration) / 10;
+      }
+      if (!(ids.d > 0)) {
+        warn('进度直报：未能获取视频时长，放弃直报');
+        return false;
+      }
+      for (let pass = 1; pass <= 2; pass++) {
+        if (Session.isStopped()) return false;
+        log(`进度直报：上报《${title}》观看记录（0 → ${Math.round(ids.d)} 秒）第 ${pass} 轮`);
+        if (!await this.sendWatchStream(ids, ids.d)) {
+          warn('进度直报：上报请求失败');
+          return false;
+        }
+        for (let i = 0; i < 15; i++) {
+          await Utils.sleep(2000);
+          if (Session.isStopped()) return false;
+          detail = await this.fetchDetail(ids);
+          const heartbeat = detail && detail.data && detail.data.heartbeat;
+          if (this.isHeartDone(heartbeat)) {
+            log(`进度直报：《${title}》已完成（rate=${heartbeat.rate ?? heartbeat.completed}）`);
+            return true;
+          }
+        }
+      }
+      warn(`进度直报：上报后仍未确认《${title}》完成`);
+      return false;
+    }
+  };
+  // 尽早安装网络钩子（document-start），页面脚本上报前即可抓取/拦截
+  VideoReporter.installHooks();
 
   // ---- 播放器工具 ----
   const Player = {
@@ -1827,6 +2214,7 @@ ${ocrText}
         if (this.outside >= list.length) {
           panel.log('课程刷完啦 🎉');
           panel.resetStartButton('刷完啦~');
+          VideoReporter.setBrushing(false);
           Store.removeProgress(this.baseUrl);
           Store.clearPendingAutoStart();
           break;
@@ -1891,6 +2279,23 @@ ${ocrText}
       const title = document.querySelector('.title')?.innerText || '视频';
       const isDeadline = document.querySelector('.box')?.innerText.includes('已过考核截止时间');
       if (isDeadline) panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
+      // 进度直报：免播放直接上报观看记录；失败时回退为倍速播放
+      if (!isDeadline && Store.getReportConf().directReport) {
+        panel.log(`进度直报模式：直接上报《${title}》的观看记录`);
+        const done = await VideoReporter.completeLeaf({ title, media: document.querySelector('video') });
+        if (done) {
+          panel.log(`${title} 已通过进度直报完成`);
+          this.updateProgress(this.outside + 1, 0);
+          if (haltIfNoAutoSwitch('当前视频处理完成')) {
+            this.shouldStop = true;
+            return;
+          }
+          history.back();
+          await Utils.sleep(1200);
+          return;
+        }
+        panel.warn('进度直报未能确认完成，回退为倍速播放');
+      }
       Player.applySpeed();
       Player.mute();
       const stopObserve = Player.blockPause(document.querySelector('video'));
@@ -1966,6 +2371,27 @@ ${ocrText}
       item.click();
       if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
+      // 进度直报：免播放直接上报观看记录；失败时回退为倍速播放
+      if (Store.getReportConf().directReport) {
+        panel.log(`进度直报模式：直接上报《${title}》的观看记录`);
+        const done = await VideoReporter.completeLeaf({
+          title,
+          media: audio ? document.querySelector('audio') : document.querySelector('video')
+        });
+        if (done) {
+          panel.log(`${title} 已通过进度直报完成`);
+          idx++;
+          this.updateProgress(this.outside, idx);
+          if (haltIfNoAutoSwitch(`${title} 播放完成`)) {
+            this.shouldStop = true;
+            return idx;
+          }
+          history.back();
+          await Utils.sleep(1500);
+          return idx;
+        }
+        panel.warn('进度直报未能确认完成，回退为倍速播放');
+      }
       let stopPause = () => { };
       if (audio) {
         Player.applySpeed(document.querySelector('audio'), true);
@@ -2172,6 +2598,16 @@ ${ocrText}
 
     // 等待课件视频播放完毕；播放器被关闭（弹窗关闭/元素销毁）时自动重新打开
     async waitCoursewareVideo() {
+      // 进度直报：免播放直接上报观看记录；失败时回退为倍速播放
+      if (Store.getReportConf().directReport) {
+        panel.log('进度直报模式：直接上报当前课件视频的观看记录');
+        const done = await VideoReporter.completeLeaf({ media: document.querySelector('video') });
+        if (done) {
+          panel.log('课件视频已通过进度直报完成');
+          return true;
+        }
+        panel.warn('进度直报未能确认完成，回退为倍速播放');
+      }
       const deadline = await Utils.getDDL();
       const start = Date.now();
       let boundVideo = null;
@@ -2321,46 +2757,54 @@ ${ocrText}
           panel.log(`讨论区暂不自动发帖，${className}`);
           await Utils.sleep(2000);
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
-          panel.log(`2s 后开始播放：${className}`);
+          panel.log(`2s 后开始处理：${className}`);
           await Utils.sleep(2000);
-          let statusTimer;
-          let videoTimer;
-          try {
-            statusTimer = setInterval(() => {
-              const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
-              if (status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成')) {
-                panel.log(`${className} 播放完毕`);
-                clearInterval(statusTimer);
-                statusTimer = null;
-              }
-            }, 200);
+          // 进度直报：免播放直接上报观看记录；失败时回退为倍速播放
+          const directDone = Store.getReportConf().directReport
+            && await VideoReporter.completeLeaf({ title: className, media: document.querySelector('video') });
+          if (directDone) {
+            panel.log(`${className} 已通过进度直报完成`);
+          } else {
+            if (Store.getReportConf().directReport) panel.warn('进度直报未能确认完成，回退为倍速播放');
+            let statusTimer;
+            let videoTimer;
+            try {
+              statusTimer = setInterval(() => {
+                const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
+                if (status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成')) {
+                  panel.log(`${className} 播放完毕`);
+                  clearInterval(statusTimer);
+                  statusTimer = null;
+                }
+              }, 200);
 
-            const videoWaitStart = Date.now();
-            videoTimer = setInterval(() => {
-              if (Session.isStopped()) return;
-              const video = document.querySelector('video');
-              if (video) {
-                setTimeout(() => {
-                  if (Session.isStopped()) return;
-                  Player.applySpeed();
-                  Player.mute();
-                  Player.blockPause(video); // 不接管清理：暂停拦截随页面持续生效，跨集数不中断
-                }, 2000);
-                clearInterval(videoTimer);
-                videoTimer = null;
-              } else if (Date.now() - videoWaitStart > 20000) {
-                location.reload();
-              }
-            }, 5000);
+              const videoWaitStart = Date.now();
+              videoTimer = setInterval(() => {
+                if (Session.isStopped()) return;
+                const video = document.querySelector('video');
+                if (video) {
+                  setTimeout(() => {
+                    if (Session.isStopped()) return;
+                    Player.applySpeed();
+                    Player.mute();
+                    Player.blockPause(video); // 不接管清理：暂停拦截随页面持续生效，跨集数不中断
+                  }, 2000);
+                  clearInterval(videoTimer);
+                  videoTimer = null;
+                } else if (Date.now() - videoWaitStart > 20000) {
+                  location.reload();
+                }
+              }, 5000);
 
-            await Utils.sleep(8000);
-            await Utils.poll(() => {
-              const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
-              return status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成');
-            }, { interval: 1000, timeout: await Utils.getDDL() });
-          } finally {
-            if (statusTimer) clearInterval(statusTimer);
-            if (videoTimer) clearInterval(videoTimer);
+              await Utils.sleep(8000);
+              await Utils.poll(() => {
+                const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
+                return status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成');
+              }, { interval: 1000, timeout: await Utils.getDDL() });
+            } finally {
+              if (statusTimer) clearInterval(statusTimer);
+              if (videoTimer) clearInterval(videoTimer);
+            }
           }
         } else if (classType.includes('zuoye')) {
           panel.log(`进入作业：${className}（暂无自动答题）`);
@@ -2390,6 +2834,7 @@ ${ocrText}
         } else {
           localStorage.removeItem(Config.storageKeys.proClassCount);
           panel.log('课程播放完毕 🎉');
+          VideoReporter.setBrushing(false);
           Store.clearPendingAutoStart();
           panel.resetStartButton('开始刷课');
           break;
@@ -2457,6 +2902,16 @@ ${ocrText}
 
     async handleMedia(route) {
       const title = AiWorkspace.getActiveLeafTitle() || `${route.type} ${route.leafId}`;
+      // 进度直报：免播放直接上报观看记录完成该任务点；失败时回退为倍速播放
+      if (Store.getReportConf().directReport) {
+        panel.log(`进度直报模式：直接上报《${title}》的观看记录`);
+        const done = await VideoReporter.completeLeaf({ title, hintVideoId: route.leafId, media: AiWorkspace.getMedia() });
+        if (done) {
+          panel.log(`${title} 已通过进度直报完成`);
+          return true;
+        }
+        panel.warn('进度直报未能确认完成，回退为倍速播放');
+      }
       panel.log(`开始播放：${title}`);
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getMedia()), { interval: 500, timeout: 20000 });
       if (Session.isStopped()) return false;
@@ -2651,6 +3106,7 @@ ${ocrText}
       if (count >= this.source.length) {
         panel.log('课程刷完啦 🎉');
         panel.resetStartButton('刷完啦~');
+        VideoReporter.setBrushing(false);
         Store.clearPendingAutoStart();
         return;
       }
@@ -2693,6 +3149,7 @@ ${ocrText}
   // 停止刷课：结束当前会话、还原对页面/播放器的修改，并持久化停止状态（重新加载也不会自动恢复）
   function stopBrushing() {
     Session.stop();
+    VideoReporter.setBrushing(false);
     Store.clearPendingAutoStart();
     const restoreOnStop = Store.getFlowConf().restoreOnStop;
     if (restoreOnStop) PageRestore.restoreAll();
@@ -2705,6 +3162,7 @@ ${ocrText}
   function start() {
     // 显式开始刷课：清除“用户已停止”状态，之后的跨页面跳转才允许自动续跑
     Session.begin();
+    VideoReporter.setBrushing(true);
     // ---- ai-workspace获取课程根目录信息并保存（处理完一个课程重定向到根目录） ----
     const classroomId = Utils.getCurrentClassroomId();
     const returnUrl = Utils.returnUrl()
